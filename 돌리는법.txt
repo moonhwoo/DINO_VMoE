@@ -1,0 +1,391 @@
+1.class 수 내 클래스와 맞추기
+2.pretrain되어있는 모델 불러오기
+=>--pretrain_model_path /path/to/a/pretrianed/model
+3.DN을 사용하였기때문에 
+dn_labebook_size >= num_classes + 1 로 설정!!
+4. 클래스 헤드의 shape 맞춰주기(몇개 맞출건지 클래스 총갯수에 따라 다름)
+=>--finetune_ignore label_enc.weight class_embed
+
+backbone = 'swin_L_384_22k' 을 =>
+python - <<EOF
+import timm
+print("timm", timm.__version__)
+print([m for m in timm.list_models() if "swin" in m and "384" in m][:30])
+EOF
+timm 1.0.24
+['swin_base_patch4_window12_384', 'swin_large_patch4_window12_384', 'swinv2_base_window12to24_192to384', 'swinv2_cr_base_384', 'swinv2_cr_giant_384', 'swinv2_cr_huge_384', 'swinv2_cr_large_384', 'swinv2_cr_small_384', 'swinv2_cr_tiny_384', 'swinv2_large_window12to24_192to384']
+여기에서  backbone = 'swin_large_patch4_window12_384' 로 바꿔줘야하나?? 매핑
+
+
+python main.py \
+  --config_file "/home/moonhw/Xray돌릴 모델/DINO/config/DINO/DINO_4scale_swin.py" \
+  --coco_path "/home/moonhw/SIXray-D/SIXray_COCO_ROOT" \
+  --output_dir outputs/dino_sixray_swin_ft \
+  --pretrain_model_path "/home/moonhw/Xray돌릴 모델/DINO/checkpoint0011_4scale_swin.pth" \
+  --finetune_ignore label_enc.weight class_embed \
+  --device cuda \
+  --num_workers 4 \
+  --seed 42 \
+  --amp \
+  --early_stop_patience 15
+=>이렇게 돌렸더니 문제 존재=> yolo할때는 이미지 사이즈를 512로 했는데 
+현재는
+data_aug_scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+data_aug_max_size = 1333 이렇게 이미지 사이즈가 달랐음
+=> 이러면 공정한 비교인가?=>x라 생각
+
+
+A.config에서 512,512로 고정하자!!
+
+
+#seed는 default로 42로되어있음
+
+B.그냥 원본 그대로 돌리기->miltigpu 사용
+
+
+******************실제 A.train 코드************************
+python main.py \
+  --config_file config/DINO/DINO_4scale_swin.py \
+  --coco_path /home/moonhw/PIDray/PIDray_COCO_ROOT \
+  --output_dir outputs/dino_PIDray_swin_ft/fix512 \
+  --pretrain_model_path checkpoint0011_4scale_swin.pth \
+  --finetune_ignore label_enc.weight class_embed \
+  --device cuda --num_workers 4 --seed 42 --amp --early_stop_patience 15 \
+  --fix_size
+ ************************************************************** 
+B.train 코드
+torchrun --nproc_per_node=2 main.py   --config_file config/DINO/DINO_4scale_swin.py   --coco_path /home/moonhw/SIXray-D/SIXray_COCO_ROOT   --output_dir outputs/dino_SIXray_swin_ft/original   --pretrain_model_path checkpoint0011_4scale_swin.pth   --finetune_ignore label_enc.weight class_embed   --device cuda --num_workers 4 --seed 42 --amp --early_stop_patience 15
+
+torchrun --nproc_per_node=2 main.py \
+  --config_file config/DINO/DINO_4scale_swin.py \
+  --coco_path /home/moonhw/PIDray/PIDray_COCO_ROOT \
+  --output_dir outputs/dino_PIDray_swin_ft/non_fix \
+  --pretrain_model_path checkpoint0011_4scale_swin.pth \
+  --finetune_ignore label_enc.weight class_embed \
+  --device cuda --num_workers 4 --seed 42 --amp --early_stop_patience 15
+
+
+ ******************************************
+A.test코드
+1.
+python main.py \
+  --config_file config/DINO/DINO_4scale_swin.py \
+  --coco_path /home/moonhw/SIXray-D/SIXray_COCO_ROOT \
+  --output_dir outputs/dino_sixray_swin_ft/fix512/test \
+  --device cuda --num_workers 4 --seed 42 --amp --fix_size \
+  --resume outputs/dino_sixray_swin_ft/fix512/checkpoint_best_regular.pth \
+  --eval --test
+
+2-1. A. sixray테스트 방법
+outputs/dino_sixray_swin_ft/fix512/test3perclass
+
+python eval_on_test.py \
+  --config_file config/DINO/DINO_4scale_swin.py \
+  --coco_path /home/moonhw/SIXray-D/SIXray_COCO_ROOT \
+  --checkpoint "/home/moonhw/Xray돌릴 모델/DINO/outputs/dino_SIXray_swin_ft/non_fix/checkpoint_best_regular.pth" \
+  --output_dir "/home/moonhw/Xray돌릴 모델/DINO/outputs/dino_SIXray_swin_ft/non_fix/SIXray_test" \
+  --device cuda --num_workers 4 \
+  --per_class --save_per_class --also_ap50_ap75 --save_results \
+  --test_dataset sixray
+
+
+fixsize 사용시 --device cuda --num_workers 4 --fix_size \ 아님 빼기!!
+!!!  주의!! test 지정안하면 알아서 sixray가 default라 sixray테스트가 돌아감 !!!
+
+2-2. pidray 테스트 방법
+
+python eval_on_test.py \
+  --config_file config/DINO/DINO_4scale_swin.py \
+  --coco_path /home/moonhw/PIDray/PIDray_COCO_ROOT \
+  --checkpoint "/home/moonhw/Xray돌릴 모델/DINO/outputs/dino_PIDray_swin_ft/non_fix/checkpoint_best_regular.pth" \
+  --output_dir "/home/moonhw/Xray돌릴 모델/DINO/outputs/dino_PIDray_swin_ft/non_fix/PIDray_test" \
+  --device cuda --num_workers 4 \
+  --per_class --save_per_class --also_ap50_ap75 --save_results \
+  --test_dataset pidray
+
+===============================
+
+V-MoE+DINO
+3.1 sixray train (최대 512 ) => 2,4,6 layer만 vmoe인경우
+PYTHONPATH=/home/moonhw/논문코드공부/V_MoE_study/dino-moe-project torchrun --nproc_per_node=2 tools/main.py   --config_file configs/DINO_4scale_swin_moe.py   --coco_path /home/moonhw/SIXray-D/SIXray_COCO_ROOT   --output_dir outputs/dino_SIXray_swin_moe   --pretrain_model_path "/home/moonhw/Xray돌릴 모델/DINO/checkpoint0011_4scale_swin.pth"   --finetune_ignore label_enc.weight class_embed   --device cuda --num_workers 4 --seed 42    --early_stop_patience 15 
+
+A:테스트:(six->six)
+PYTHONPATH=/home/moonhw/논문코드공부/V_MoE_study/dino-moe-project:/home/moonhw/논문코드공부/V_MoE_study/dino-moe-project/tools torchrun --nproc_per_node=2 tools/eval_on_test.py   --config_file configs/DINO_4scale_swin_moe.py   --coco_path /home/moonhw/SIXray-D/SIXray_COCO_ROOT   --checkpoint outputs/dino_SIXray_swin_moe_6/checkpoint_best_regular.pth   --output_dir outputs/dino_SIXray_swin_moe_6/SIXray_test   --device cuda   --num_workers 4   --per_class   --save_per_class   --also_ap50_ap75   --save_results   --test_dataset sixray
+
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.811                                                                                                                                 
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.947                                                                                                                                 
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.888                                                                                                                                 
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = -1.000                                                                                                                                
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.727                                                                                                                                 
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.813                                                                                                                                 
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.602                                                                                                                                 
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.872                                                                                                                                 
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.895                                                                                                                                 
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = -1.000                                                                                                                                
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.855                                                                                                                                 
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.907                                                                                                                                 
+Test: loss=2.6238, class_error=2.4561, mAP=0.8110     
+                                                                                                                                                             
+Test stats: {'class_error': 2.456140390423496, 'loss': 2.6237755947563635, 'loss_bbox': 0.09890528078052843, 'loss_bbox_0': 0.11078931375197246, 'loss_bbox_1': 0.10198435326369755, 'loss_bbox_2': 0.0986006651
+8312294, 'loss_bbox_3': 0.09802051048066342, 'loss_bbox_4': 0.09956143877099148, 'loss_bbox_dn': 0.0, 'loss_bbox_dn_0': 0.0, 'loss_bbox_dn_1': 0.0, 'loss_bbox_dn_2': 0.0, 'loss_bbox_dn_3': 0.0, 'loss_bbox_dn_
+4': 0.0, 'loss_bbox_interm': 0.12554826568277402, 'loss_ce': 0.06796498796635667, 'loss_ce_0': 0.08350676692458348, 'loss_ce_1': 0.07676370798402456, 'loss_ce_2': 0.07187978368326216, 'loss_ce_3': 0.069170705
+99242246, 'loss_ce_4': 0.06698751103681932, 'loss_ce_dn': 0.0, 'loss_ce_dn_0': 0.0, 'loss_ce_dn_1': 0.0, 'loss_ce_dn_2': 0.0, 'loss_ce_dn_3': 0.0, 'loss_ce_dn_4': 0.0, 'loss_ce_interm': 0.10516727602392832, '
+loss_giou': 0.18293489595991003, 'loss_giou_0': 0.20168121634095765, 'loss_giou_1': 0.1875974899024199, 'loss_giou_2': 0.18222696160336146, 'loss_giou_3': 0.18162940277686815, 'loss_giou_4': 0.183461920433994
+12, 'loss_giou_dn': 0.0, 'loss_giou_dn_0': 0.0, 'loss_giou_dn_1': 0.0, 'loss_giou_dn_2': 0.0, 'loss_giou_dn_3': 0.0, 'loss_giou_dn_4': 0.0, 'loss_giou_interm': 0.2293931271025296, 'cardinality_error_unscaled'
+: 882.2308612440191, 'cardinality_error_0_unscaled': 841.1232057416267, 'cardinality_error_1_unscaled': 834.6866028708134, 'cardinality_error_2_unscaled': 856.2284688995215, 'cardinality_error_3_unscaled': 86
+6.0956937799043, 'cardinality_error_4_unscaled': 876.6315789473684, 'cardinality_error_dn_unscaled': 0.0, 'cardinality_error_dn_0_unscaled': 0.0, 'cardinality_error_dn_1_unscaled': 0.0, 'cardinality_error_dn_
+2_unscaled': 0.0, 'cardinality_error_dn_3_unscaled': 0.0, 'cardinality_error_dn_4_unscaled': 0.0, 'cardinality_error_interm_unscaled': 791.6770334928229, 'class_error_unscaled': 2.456140390423496, 'loss_bbox_
+unscaled': 0.01978105610363524, 'loss_bbox_0_unscaled': 0.022157862690014487, 'loss_bbox_1_unscaled': 0.02039687072136328, 'loss_bbox_2_unscaled': 0.01972013301523536, 'loss_bbox_3_unscaled': 0.01960410208677
+4898, 'loss_bbox_4_unscaled': 0.019912287768346377, 'loss_bbox_dn_unscaled': 0.0, 'loss_bbox_dn_0_unscaled': 0.0, 'loss_bbox_dn_1_unscaled': 0.0, 'loss_bbox_dn_2_unscaled': 0.0, 'loss_bbox_dn_3_unscaled': 0.0
+, 'loss_bbox_dn_4_unscaled': 0.0, 'loss_bbox_interm_unscaled': 0.02510965304810144, 'loss_ce_unscaled': 0.06796498796635667, 'loss_ce_0_unscaled': 0.08350676692458348, 'loss_ce_1_unscaled': 0.0767637079840245
+6, 'loss_ce_2_unscaled': 0.07187978368326216, 'loss_ce_3_unscaled': 0.06917070599242246, 'loss_ce_4_unscaled': 0.06698751103681932, 'loss_ce_dn_unscaled': 0.0, 'loss_ce_dn_0_unscaled': 0.0, 'loss_ce_dn_1_unsc
+aled': 0.0, 'loss_ce_dn_2_unscaled': 0.0, 'loss_ce_dn_3_unscaled': 0.0, 'loss_ce_dn_4_unscaled': 0.0, 'loss_ce_interm_unscaled': 0.10516727602392832, 'loss_giou_unscaled': 0.09146744797995501, 'loss_giou_0_un
+scaled': 0.10084060817047882, 'loss_giou_1_unscaled': 0.09379874495120995, 'loss_giou_2_unscaled': 0.09111348080168073, 'loss_giou_3_unscaled': 0.09081470138843407, 'loss_giou_4_unscaled': 0.09173096021699706
+, 'loss_giou_dn_unscaled': 0.0, 'loss_giou_dn_0_unscaled': 0.0, 'loss_giou_dn_1_unscaled': 0.0, 'loss_giou_dn_2_unscaled': 0.0, 'loss_giou_dn_3_unscaled': 0.0, 'loss_giou_dn_4_unscaled': 0.0, 'loss_giou_inter
+m_unscaled': 0.1146965635512648, 'loss_hw_unscaled': 0.01294359493483767, 'loss_hw_0_unscaled': 0.014802919352052813, 'loss_hw_1_unscaled': 0.013411173140229079, 'loss_hw_2_unscaled': 0.012926280873373115, 'l
+oss_hw_3_unscaled': 0.012865342214006183, 'loss_hw_4_unscaled': 0.013000697455631845, 'loss_hw_dn_unscaled': 0.0, 'loss_hw_dn_0_unscaled': 0.0, 'loss_hw_dn_1_unscaled': 0.0, 'loss_hw_dn_2_unscaled': 0.0, 'los
+s_hw_dn_3_unscaled': 0.0, 'loss_hw_dn_4_unscaled': 0.0, 'loss_hw_interm_unscaled': 0.01702954687187047, 'loss_xy_unscaled': 0.006837461171861132, 'loss_xy_0_unscaled': 0.007354943447275105, 'loss_xy_1_unscale
+d': 0.006985697640455885, 'loss_xy_2_unscaled': 0.006793852178067967, 'loss_xy_3_unscaled': 0.006738759938496027, 'loss_xy_4_unscaled': 0.006911590265090082, 'loss_xy_dn_unscaled': 0.0, 'loss_xy_dn_0_unscaled
+': 0.0, 'loss_xy_dn_1_unscaled': 0.0, 'loss_xy_dn_2_unscaled': 0.0, 'loss_xy_dn_3_unscaled': 0.0, 'loss_xy_dn_4_unscaled': 0.0, 'loss_xy_interm_unscaled': 0.0080801061127317, 'coco_eval_bbox': [0.811031293137
+4752, 0.9472324056242535, 0.887831348199275, -1.0, 0.7271338359233546, 0.8130996598524506, 0.6019399880607597, 0.8715059370404546, 0.895368731273409, -1.0, 0.8551838261577391, 0.907032204543002]}
+Saved coco eval to outputs/dino_SIXray_swin_moe/SIXray_test/eval/test_latest.pth
+
+======================================================================
+Overall COCO Metrics:
+======================================================================
+  mAP@[0.50:0.95] (IoU=0.50:0.95, area=all, maxDets=100) = 0.8110
+  mAP@0.50        (IoU=0.50,      area=all, maxDets=100) = 0.9472
+  mAP@0.75        (IoU=0.75,      area=all, maxDets=100) = 0.8878
+  mAR             (IoU=0.50:0.95, area=all, maxDets=100) = 0.8954
+======================================================================
+
+Saved overall metrics to outputs/dino_SIXray_swin_moe/SIXray_test/eval/overall_metrics.csv
+
+
+Per-class AP:
+Category                      ID  AP50:95     AP50     AP75
+----------------------------------------------------------------------
+Gun                            0   0.9353   0.9883   0.9687
+Knife                          1   0.8538   0.9683   0.9346
+Wrench                         2   0.7795   0.9183   0.8396
+Scissors                       4   0.7497   0.9308   0.8747
+Pliers                         3   0.7368   0.9306   0.8216
+
+B(SIX->PID) 테스트
+PYTHONPATH=/home/moonhw/논문코드공부/V_MoE_study/dino-moe-project:/home/moonhw/논문코드공부/V_MoE_study/dino-moe-project/tools torchrun --nproc_per_node=2 tools/eval_on_test.py   --config_file configs/DINO_4scale_swin_moe.py   --coco_path /home/moonhw/PIDray/PIDray_COCO_ROOT   --checkpoint outputs/dino_SIXray_swin_moe_6/checkpoint_best_regular.pth   --output_dir outputs/dino_SIXray_swin_moe_6/PIDray_test   --device cuda   --num_workers 4   --per_class   --save_per_class   --also_ap50_ap75   --save_results   --test_dataset pidray
+
+IoU metric: bbox                                                                                                                                                                                                
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.566
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.699
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.602
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.112
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.582
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.304
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.600
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.782
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.838
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.574
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.827
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.889
+Test: loss=6.1295, class_error=11.6580, mAP=0.5657
+Test stats: {'class_error': 11.657971348023294, 'loss': 6.129505405821274, 'loss_bbox': 0.2942670098231436, 'loss_bbox_0': 0.2957585985792937, 'loss_bbox_1': 0.28007160448802404, 'loss_bbox_2': 0.279125794513
+6873, 'loss_bbox_3': 0.2764477446640396, 'loss_bbox_4': 0.2879699839610651, 'loss_bbox_dn': 0.0, 'loss_bbox_dn_0': 0.0, 'loss_bbox_dn_1': 0.0, 'loss_bbox_dn_2': 0.0, 'loss_bbox_dn_3': 0.0, 'loss_bbox_dn_4': 0
+.0, 'loss_bbox_interm': 0.3297007657750946, 'loss_ce': 0.25396730557006947, 'loss_ce_0': 0.2857595293296662, 'loss_ce_1': 0.2774638525949711, 'loss_ce_2': 0.2660689116048015, 'loss_ce_3': 0.26044438090800914,
+ 'loss_ce_4': 0.2554350294216593, 'loss_ce_dn': 0.0, 'loss_ce_dn_0': 0.0, 'loss_ce_dn_1': 0.0, 'loss_ce_dn_2': 0.0, 'loss_ce_dn_3': 0.0, 'loss_ce_dn_4': 0.0, 'loss_ce_interm': 0.30142185495712387, 'loss_giou'
+: 0.30766594973495914, 'loss_giou_0': 0.3192285620028334, 'loss_giou_1': 0.301994269537649, 'loss_giou_2': 0.29893885173373164, 'loss_giou_3': 0.29623932518014207, 'loss_giou_4': 0.3035345099663308, 'loss_gio
+u_dn': 0.0, 'loss_giou_dn_0': 0.0, 'loss_giou_dn_1': 0.0, 'loss_giou_dn_2': 0.0, 'loss_giou_dn_3': 0.0, 'loss_giou_dn_4': 0.0, 'loss_giou_interm': 0.3580015825926369, 'cardinality_error_unscaled': 851.6901618
+398637, 'cardinality_error_0_unscaled': 781.0590928449744, 'cardinality_error_1_unscaled': 723.6988926746167, 'cardinality_error_2_unscaled': 789.9947827938671, 'cardinality_error_3_unscaled': 810.81612010221
+47, 'cardinality_error_4_unscaled': 835.0576022146507, 'cardinality_error_dn_unscaled': 0.0, 'cardinality_error_dn_0_unscaled': 0.0, 'cardinality_error_dn_1_unscaled': 0.0, 'cardinality_error_dn_2_unscaled': 
+0.0, 'cardinality_error_dn_3_unscaled': 0.0, 'cardinality_error_dn_4_unscaled': 0.0, 'cardinality_error_interm_unscaled': 688.8721252129471, 'class_error_unscaled': 11.657971348023294, 'loss_bbox_unscaled': 0
+.058853401973830884, 'loss_bbox_0_unscaled': 0.05915171965330782, 'loss_bbox_1_unscaled': 0.05601432087906165, 'loss_bbox_2_unscaled': 0.055825158916778694, 'loss_bbox_3_unscaled': 0.05528954893875759, 'loss_
+bbox_4_unscaled': 0.05759399681337403, 'loss_bbox_dn_unscaled': 0.0, 'loss_bbox_dn_0_unscaled': 0.0, 'loss_bbox_dn_1_unscaled': 0.0, 'loss_bbox_dn_2_unscaled': 0.0, 'loss_bbox_dn_3_unscaled': 0.0, 'loss_bbox_
+dn_4_unscaled': 0.0, 'loss_bbox_interm_unscaled': 0.06594015316727525, 'loss_ce_unscaled': 0.25396730557006947, 'loss_ce_0_unscaled': 0.2857595293296662, 'loss_ce_1_unscaled': 0.2774638525949711, 'loss_ce_2_u
+nscaled': 0.2660689116048015, 'loss_ce_3_unscaled': 0.26044438090800914, 'loss_ce_4_unscaled': 0.2554350294216593, 'loss_ce_dn_unscaled': 0.0, 'loss_ce_dn_0_unscaled': 0.0, 'loss_ce_dn_1_unscaled': 0.0, 'loss
+_ce_dn_2_unscaled': 0.0, 'loss_ce_dn_3_unscaled': 0.0, 'loss_ce_dn_4_unscaled': 0.0, 'loss_ce_interm_unscaled': 0.30142185495712387, 'loss_giou_unscaled': 0.15383297486747957, 'loss_giou_0_unscaled': 0.159614
+2810014167, 'loss_giou_1_unscaled': 0.1509971347688245, 'loss_giou_2_unscaled': 0.14946942586686582, 'loss_giou_3_unscaled': 0.14811966259007103, 'loss_giou_4_unscaled': 0.1517672549831654, 'loss_giou_dn_unsc
+aled': 0.0, 'loss_giou_dn_0_unscaled': 0.0, 'loss_giou_dn_1_unscaled': 0.0, 'loss_giou_dn_2_unscaled': 0.0, 'loss_giou_dn_3_unscaled': 0.0, 'loss_giou_dn_4_unscaled': 0.0, 'loss_giou_interm_unscaled': 0.17900
+079129631846, 'loss_hw_unscaled': 0.04065815845819339, 'loss_hw_0_unscaled': 0.040994912874111444, 'loss_hw_1_unscaled': 0.03894386219782549, 'loss_hw_2_unscaled': 0.03870044211033784, 'loss_hw_3_unscaled': 0
+.03828491748628338, 'loss_hw_4_unscaled': 0.03979975700407572, 'loss_hw_dn_unscaled': 0.0, 'loss_hw_dn_0_unscaled': 0.0, 'loss_hw_dn_1_unscaled': 0.0, 'loss_hw_dn_2_unscaled': 0.0, 'loss_hw_dn_3_unscaled': 0.
+0, 'loss_hw_dn_4_unscaled': 0.0, 'loss_hw_interm_unscaled': 0.04633821167263601, 'loss_xy_unscaled': 0.018195243543105158, 'loss_xy_0_unscaled': 0.01815680684161839, 'loss_xy_1_unscaled': 0.017070458694598147
+, 'loss_xy_2_unscaled': 0.017124716783237123, 'loss_xy_3_unscaled': 0.017004631467745043, 'loss_xy_4_unscaled': 0.017794239811678186, 'loss_xy_dn_unscaled': 0.0, 'loss_xy_dn_0_unscaled': 0.0, 'loss_xy_dn_1_un
+scaled': 0.0, 'loss_xy_dn_2_unscaled': 0.0, 'loss_xy_dn_3_unscaled': 0.0, 'loss_xy_dn_4_unscaled': 0.0, 'loss_xy_interm_unscaled': 0.019601941526717914, 'coco_eval_bbox': [0.5657348329326357, 0.69879289326461
+99, 0.6020875714004726, 0.11192969699248982, 0.5815896834187356, 0.3038287883289237, 0.6003028772275847, 0.7824506526340111, 0.8380856860733934, 0.573675342201658, 0.8273494561654807, 0.8888110987241423]}    
+Saved coco eval to outputs/dino_SIXray_swin_moe/PIDray_test/eval/test_latest.pth   
+
+======================================================================                                                                                                                                          
+Overall COCO Metrics:                                                                                                                                                                                           
+======================================================================                                                                                                                                          
+  mAP@[0.50:0.95] (IoU=0.50:0.95, area=all, maxDets=100) = 0.5657                                                                                                                                               
+  mAP@0.50        (IoU=0.50,      area=all, maxDets=100) = 0.6988                                                                                                                                               
+  mAP@0.75        (IoU=0.75,      area=all, maxDets=100) = 0.6021                                                                                                                                               
+  mAR             (IoU=0.50:0.95, area=all, maxDets=100) = 0.8381                                                                                                                                               
+======================================================================                                                                                                                                          
+
+Saved overall metrics to outputs/dino_SIXray_swin_moe/PIDray_test/eval/overall_metrics.csv
+
+
+Per-class AP:
+Category                      ID  AP50:95     AP50     AP75
+----------------------------------------------------------------------
+Wrench                         2   0.8620   0.9325   0.9162
+Pliers                         3   0.7643   0.9011   0.8368
+Gun                            0   0.6109   0.7515   0.6495
+Scissors                       4   0.4270   0.6124   0.4545
+Knife                          1   0.1645   0.2965   0.1534
+
+
+3-2 4,6만 moelayer인경우
+a. six->six
+IoU metric: bbox                                                                                                                                                                                                
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.810                                                                                                                                 
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.947                                                                                                                                 
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.880                                                                                                                                 
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = -1.000                                                                                                                                
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.732                                                                                                                                 
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.819                                                                                                                                 
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.601                                                                                                                                 
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.871                                                                                                                                 
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.890
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = -1.000
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.850
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.901
+DONE (t=0.57s).
+Test: loss=2.6543, class_error=2.0235, mAP=0.8098
+
+Test stats: Test: loss=2.6543, class_error=2.0235, mAP=0.8098                                                                                                                                                   
+{'class_error': 2.0235247726075385, 'loss': 2.654289255301918, 'loss_bbox': 0.09995605211491077, 'loss_bbox_0': 0.11337147455698138, 'loss_bbox_1': 0.10348166923292658, 'loss_bbox_2': 0.0994839715018298, 'los
+s_bbox_3': 0.09964158456398255, 'loss_bbox_4': 0.09966975443831613, 'loss_bbox_dn': 0.0, 'loss_bbox_dn_0': 0.0, 'loss_bbox_dn_1': 0.0, 'loss_bbox_dn_2': 0.0, 'loss_bbox_dn_3': 0.0, 'loss_bbox_dn_4': 0.0, 'los
+s_bbox_interm': 0.1280531808377453, 'loss_ce': 0.06633031594392116, 'loss_ce_0': 0.08251355443341696, 'loss_ce_1': 0.07666179555722816, 'loss_ce_2': 0.07000267769154653, 'loss_ce_3': 0.06719984521125001, 'los
+s_ce_4': 0.0660467996895849, 'loss_ce_dn': 0.0, 'loss_ce_dn_0': 0.0, 'loss_ce_dn_1': 0.0, 'loss_ce_dn_2': 0.0, 'loss_ce_dn_3': 0.0, 'loss_ce_dn_4': 0.0, 'loss_ce_interm': 0.10504979436692691, 'loss_giou': 0.1
+8608025135249612, 'loss_giou_0': 0.20846303912441125, 'loss_giou_1': 0.19078243846456971, 'loss_giou_2': 0.1853883255932605, 'loss_giou_3': 0.18546487210077817, 'loss_giou_4': 0.1856270361976903, 'loss_giou_d
+n': 0.0, 'loss_giou_dn_0': 0.0, 'loss_giou_dn_1': 0.0, 'loss_giou_dn_2': 0.0, 'loss_giou_dn_3': 0.0, 'loss_giou_dn_4': 0.0, 'loss_giou_interm': 0.23502081819769868, 'cardinality_error_unscaled': 888.412679425
+8373, 'cardinality_error_0_unscaled': 738.9090909090909, 'cardinality_error_1_unscaled': 790.1244019138755, 'cardinality_error_2_unscaled': 835.078947368421, 'cardinality_error_3_unscaled': 851.9976076555024,
+ 'cardinality_error_4_unscaled': 804.1112440191388, 'cardinality_error_dn_unscaled': 0.0, 'cardinality_error_dn_0_unscaled': 0.0, 'cardinality_error_dn_1_unscaled': 0.0, 'cardinality_error_dn_2_unscaled': 0.0
+, 'cardinality_error_dn_3_unscaled': 0.0, 'cardinality_error_dn_4_unscaled': 0.0, 'cardinality_error_interm_unscaled': 869.6423444976076, 'class_error_unscaled': 2.0235247726075385, 'loss_bbox_unscaled': 0.01
+999121043066891, 'loss_bbox_0_unscaled': 0.02267429489825081, 'loss_bbox_1_unscaled': 0.02069633391142141, 'loss_bbox_2_unscaled': 0.019896794255359465, 'loss_bbox_3_unscaled': 0.019928316895417762, 'loss_bbo
+x_4_unscaled': 0.0199339508812019, 'loss_bbox_dn_unscaled': 0.0, 'loss_bbox_dn_0_unscaled': 0.0, 'loss_bbox_dn_1_unscaled': 0.0, 'loss_bbox_dn_2_unscaled': 0.0, 'loss_bbox_dn_3_unscaled': 0.0, 'loss_bbox_dn_4
+_unscaled': 0.0, 'loss_bbox_interm_unscaled': 0.025610636146605442, 'loss_ce_unscaled': 0.06633031594392116, 'loss_ce_0_unscaled': 0.08251355443341696, 'loss_ce_1_unscaled': 0.07666179555722816, 'loss_ce_2_un
+scaled': 0.07000267769154653, 'loss_ce_3_unscaled': 0.06719984521125001, 'loss_ce_4_unscaled': 0.0660467996895849, 'loss_ce_dn_unscaled': 0.0, 'loss_ce_dn_0_unscaled': 0.0, 'loss_ce_dn_1_unscaled': 0.0, 'loss_ce_dn_2_unscaled': 0.0, 'loss_ce_dn_3_unscaled': 0.0, 'loss_ce_dn_4_unscaled': 0.0, 'loss_ce_interm_unscaled': 0.10504979436692691, 'loss_giou_unscaled': 0.09304012567624806, 'loss_giou_0_unscaled': 0.10423151956220562, 'loss_giou_1_unscaled': 0.09539121923228486, 'loss_giou_2_unscaled': 0.09269416279663024, 'loss_giou_3_unscaled': 0.09273243605038908, 'loss_giou_4_unscaled': 0.09281351809884515, 'loss_giou_dn_unscaled': 0.0, 'loss_giou_dn_0_unscaled': 0.0, 'loss_giou_dn_1_unscaled': 0.0, 'loss_giou_dn_2_unscaled': 0.0, 'loss_giou_dn_3_unscaled': 0.0, 'loss_giou_dn_4_unscaled': 0.0, 'loss_giou_interm_unscaled': 0.11751040909884934, 'loss_hw_unscaled': 0.013148560345787822, 'loss_hw_0_unscaled': 0.015148780343755545, 'loss_hw_1_unscaled': 0.013659057845183287, 'loss_hw_2_unscaled': 0.013113255423446895, 'loss_hw_3_unscaled': 0.01312420798441101, 'loss_hw_4_unscaled': 0.013113018371216045, 'loss_hw_dn_unscaled': 0.0, 'loss_hw_dn_0_unscaled': 0.0, 'loss_hw_dn_1_unscaled': 0.0, 'loss_hw_dn_2_unscaled': 0.0, 'loss_hw_dn_3_unscaled': 0.0, 'loss_hw_dn_4_unscaled': 0.0, 'loss_hw_interm_unscaled': 0.017375230048359794, 'loss_xy_unscaled': 0.006842650123871863, 'loss_xy_0_unscaled': 0.007525514549760674, 'loss_xy_1_unscaled': 0.007037276122496245, 'loss_xy_2_unscaled': 0.0067835387898582305, 'loss_xy_3_unscaled': 0.006804108885105735, 'loss_xy_4_unscaled': 0.006820932523911132, 'loss_xy_dn_unscaled': 0.0, 'loss_xy_dn_0_unscaled': 0.0, 'loss_xy_dn_1_unscaled': 0.0, 'loss_xy_dn_2_unscaled': 0.0, 'loss_xy_dn_3_unscaled': 0.0, 'loss_xy_dn_4_unscaled': 0.0, 'loss_xy_interm_unscaled': 0.008235406167315025, 'coco_eval_bbox': [0.8098094394353732, 0.9473121938646855, 0.8800042903997283, -1.0, 0.731725097887013, 0.8193224480155294, 0.6009421357887574, 0.8705275340495708, 0.8902071826363519, -1.0, 0.8498315018315019, 0.9007370639593816]}
+Saved coco eval to outputs/dino_SIXray_swin_moe_46/SIXray_test/eval/test_latest.pth
+
+======================================================================
+Overall COCO Metrics:
+======================================================================
+  mAP@[0.50:0.95] (IoU=0.50:0.95, area=all, maxDets=100) = 0.8098
+  mAP@0.50        (IoU=0.50,      area=all, maxDets=100) = 0.9473
+  mAP@0.75        (IoU=0.75,      area=all, maxDets=100) = 0.8800
+  mAR             (IoU=0.50:0.95, area=all, maxDets=100) = 0.8902
+======================================================================
+
+Saved overall metrics to outputs/dino_SIXray_swin_moe_46/SIXray_test/eval/overall_metrics.csv
+
+
+Per-class AP:
+Category                      ID  AP50:95     AP50     AP75
+----------------------------------------------------------------------
+Gun                            0   0.9375   0.9888   0.9779
+Knife                          1   0.8529   0.9670   0.9269
+Wrench                         2   0.7718   0.9180   0.8502
+Scissors                       4   0.7615   0.9309   0.8466
+Pliers                         3   0.7254   0.9318   0.7986
+Saved per-class AP to outputs/dino_SIXray_swin_moe_46/SIXray_test/eval/per_class_ap.csv
+
+six->pidray
+Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.580
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.722
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.618
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.119
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.602
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.317
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.614
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.773
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.815
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.550
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.805
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.742
+Test: loss=6.3446, class_error=12.7280, mAP=0.5804
+
+Test stats: {'class_error': 12.728030976485556, 'loss': 6.3445771314406825, 'loss_bbox': 0.3190752028561399, 'loss_bbox_0': 0.31136746872279925, 'loss_bbox_1': 0.30208260126592784, 'loss_bbox_2': 0.3015382726
+6561367, 'loss_bbox_3': 0.3067029001083371, 'loss_bbox_4': 0.3161093623946965, 'loss_bbox_dn': 0.0, 'loss_bbox_dn_0': 0.0, 'loss_bbox_dn_1': 0.0, 'loss_bbox_dn_2': 0.0, 'loss_bbox_dn_3': 0.0, 'loss_bbox_dn_4'
+: 0.0, 'loss_bbox_interm': 0.3484711959018821, 'loss_ce': 0.24328038337214142, 'loss_ce_0': 0.2847522273037903, 'loss_ce_1': 0.2649459069339847, 'loss_ce_2': 0.25295468346288374, 'loss_ce_3': 0.24920892980979
+298, 'loss_ce_4': 0.24598118493245014, 'loss_ce_dn': 0.0, 'loss_ce_dn_0': 0.0, 'loss_ce_dn_1': 0.0, 'loss_ce_dn_2': 0.0, 'loss_ce_dn_3': 0.0, 'loss_ce_dn_4': 0.0, 'loss_ce_interm': 0.300576813680262, 'loss_gi
+ou': 0.32459942097545585, 'loss_giou_0': 0.33049247161448764, 'loss_giou_1': 0.31692939982757456, 'loss_giou_2': 0.3141920083841814, 'loss_giou_3': 0.3166726237270835, 'loss_giou_4': 0.32292431455860754, 'los
+s_giou_dn': 0.0, 'loss_giou_dn_0': 0.0, 'loss_giou_dn_1': 0.0, 'loss_giou_dn_2': 0.0, 'loss_giou_dn_3': 0.0, 'loss_giou_dn_4': 0.0, 'loss_giou_interm': 0.3717197616040402, 'cardinality_error_unscaled': 879.44
+49531516184, 'cardinality_error_0_unscaled': 631.8715928449744, 'cardinality_error_1_unscaled': 706.6717419080068, 'cardinality_error_2_unscaled': 773.7537265758092, 'cardinality_error_3_unscaled': 827.900979
+5570698, 'cardinality_error_4_unscaled': 773.634902044293, 'cardinality_error_dn_unscaled': 0.0, 'cardinality_error_dn_0_unscaled': 0.0, 'cardinality_error_dn_1_unscaled': 0.0, 'cardinality_error_dn_2_unscale
+d': 0.0, 'cardinality_error_dn_3_unscaled': 0.0, 'cardinality_error_dn_4_unscaled': 0.0, 'cardinality_error_interm_unscaled': 837.0907155025553, 'class_error_unscaled': 12.728030976485556, 'loss_bbox_unscaled
+': 0.06381504056960173, 'loss_bbox_0_unscaled': 0.06227349374949808, 'loss_bbox_1_unscaled': 0.060416520288209326, 'loss_bbox_2_unscaled': 0.06030765448671526, 'loss_bbox_3_unscaled': 0.061340580097724105, 'l
+oss_bbox_4_unscaled': 0.06322187247540915, 'loss_bbox_dn_unscaled': 0.0, 'loss_bbox_dn_0_unscaled': 0.0, 'loss_bbox_dn_1_unscaled': 0.0, 'loss_bbox_dn_2_unscaled': 0.0, 'loss_bbox_dn_3_unscaled': 0.0, 'loss_b
+box_dn_4_unscaled': 0.0, 'loss_bbox_interm_unscaled': 0.06969423923368552, 'loss_ce_unscaled': 0.24328038337214142, 'loss_ce_0_unscaled': 0.2847522273037903, 'loss_ce_1_unscaled': 0.2649459069339847, 'loss_ce
+_2_unscaled': 0.25295468346288374, 'loss_ce_3_unscaled': 0.24920892980979298, 'loss_ce_4_unscaled': 0.24598118493245014, 'loss_ce_dn_unscaled': 0.0, 'loss_ce_dn_0_unscaled': 0.0, 'loss_ce_dn_1_unscaled': 0.0,
+ 'loss_ce_dn_2_unscaled': 0.0, 'loss_ce_dn_3_unscaled': 0.0, 'loss_ce_dn_4_unscaled': 0.0, 'loss_ce_interm_unscaled': 0.300576813680262, 'loss_giou_unscaled': 0.16229971048772793, 'loss_giou_0_unscaled': 0.16
+524623580724382, 'loss_giou_1_unscaled': 0.15846469991378728, 'loss_giou_2_unscaled': 0.1570960041920907, 'loss_giou_3_unscaled': 0.15833631186354175, 'loss_giou_4_unscaled': 0.16146215727930377, 'loss_giou_d
+n_unscaled': 0.0, 'loss_giou_dn_0_unscaled': 0.0, 'loss_giou_dn_1_unscaled': 0.0, 'loss_giou_dn_2_unscaled': 0.0, 'loss_giou_dn_3_unscaled': 0.0, 'loss_giou_dn_4_unscaled': 0.0, 'loss_giou_interm_unscaled': $
+.1858598808020201, 'loss_hw_unscaled': 0.044231482384725615, 'loss_hw_0_unscaled': 0.043328854090076425, 'loss_hw_1_unscaled': 0.04198604746459106, 'loss_hw_2_unscaled': 0.041850725896366965, 'loss_hw_3_unsca
+led': 0.04256295635147985, 'loss_hw_4_unscaled': 0.04378620227576698, 'loss_hw_dn_unscaled': 0.0, 'loss_hw_dn_0_unscaled': 0.0, 'loss_hw_dn_1_unscaled': 0.0, 'loss_hw_dn_2_unscaled': 0.0, 'loss_hw_dn_3_unscal
+ed': 0.0, 'loss_hw_dn_4_unscaled': 0.0, 'loss_hw_interm_unscaled': 0.04904782940440032, 'loss_xy_unscaled': 0.01958355816764685, 'loss_xy_0_unscaled': 0.018944639673948785, 'loss_xy_1_unscaled': 0.01843047280
+3662064, 'loss_xy_2_unscaled': 0.01845692862111308, 'loss_xy_3_unscaled': 0.018777623804377547, 'loss_xy_4_unscaled': 0.019435670234224666, 'loss_xy_dn_unscaled': 0.0, 'loss_xy_dn_0_unscaled': 0.0, 'loss_xy_d
+n_1_unscaled': 0.0, 'loss_xy_dn_2_unscaled': 0.0, 'loss_xy_dn_3_unscaled': 0.0, 'loss_xy_dn_4_unscaled': 0.0, 'loss_xy_interm_unscaled': 0.020646409867164796, 'coco_eval_bbox': [0.5804396264005127, 0.72247245
+55170035, 0.6176051828606952, 0.11850222088680762, 0.6019585078606292, 0.31719206699218855, 0.6138404925533635, 0.7733510680484303, 0.815183427882172, 0.550198958935801, 0.8053486783370631, 0.7418924811098724
+]}
+
+======================================================================
+Overall COCO Metrics:
+======================================================================
+  mAP@[0.50:0.95] (IoU=0.50:0.95, area=all, maxDets=100) = 0.5804
+  mAP@0.50        (IoU=0.50,      area=all, maxDets=100) = 0.7225
+  mAP@0.75        (IoU=0.75,      area=all, maxDets=100) = 0.6176
+  mAR             (IoU=0.50:0.95, area=all, maxDets=100) = 0.8152
+======================================================================
+
+Saved overall metrics to outputs/dino_SIXray_swin_moe_46/PIDray_test/eval/overall_metrics.csv
+
+
+Per-class AP:
+Category                      ID  AP50:95     AP50     AP75
+----------------------------------------------------------------------
+Wrench                         2   0.8705   0.9503   0.9293
+Pliers                         3   0.7587   0.9000   0.8291
+Gun                            0   0.6171   0.7593   0.6518
+Scissors                       4   0.4749   0.6782   0.5068
+Knife                          1   0.1810   0.3246   0.1710
+Saved per-class AP to outputs/dino_SIXray_swin_moe_46/PIDray_test/eval/per_class_ap.csv
+
+
+3-3 6만 moelayer인경우
+
+
+
+
+
+
+====시각화 방법=========
+
+# 학습 중 자동 시각화
+python tools/main.py \
+  -c configs/DINO_4scale_swin_moe.py \
+  --coco_path /path/to/coco \
+  --output_dir output/exp1 \
+  --vis_image_ids 139 285 632 1000 \
+  --vis_every_n_epochs 5
+
+# 학습 후 단독 확인
+python tools/visualize_routing.py \
+  -c configs/DINO_4scale_swin_moe.py \
+  --checkpoint output/exp1/checkpoint_best_regular.pth \
+  --coco_path /path/to/coco \
+  --image_ids 139 285 632 1000 \
+  --output_dir output/exp1
+  
+  
+  ============ 12층 짝수층 전부moe + 6층 가중치로 초기화 해서 복사 ===============
+  
+PYTHONPATH=/home/moonhw/논문코드공부/V_MoE_study/dino-moe-project torchrun --nproc_per_node=2 tools/main.py \
+  --config_file configs/DINO_4scale_swin_moe.py \
+  --coco_path /home/moonhw/SIXray-D/SIXray_COCO_ROOT \
+  --output_dir outputs/idea02_scale_aware_R/dino_SIXray_swin_moe_12_evenlayer_tile \
+  --pretrain_model_path "/home/moonhw/Xray_models/DINO/checkpoint0011_4scale_swin.pth" \
+  --finetune_ignore label_enc.weight class_embed \
+  --device cuda --num_workers 4 --seed 42 \
+  --early_stop_patience 15 \
+  --tile_encoder
