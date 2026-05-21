@@ -52,8 +52,12 @@ def get_args_parser():
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--pretrain_model_path', help='load from other checkpoint')
     parser.add_argument('--finetune_ignore', type=str, nargs='+')
-    parser.add_argument('--tile_encoder', action='store_true',
-                        help='pretrained 6층 가중치를 나머지 층에도 복사해서 초기화')
+    parser.add_argument('--encoder_init', default='random',
+                        choices=['random', 'tile', 'last'],
+                        help='7층 이후 encoder 초기화 방식: '
+                             'random=랜덤(기본), '
+                             'tile=1~6층 패턴 반복(0→6,1→7,...), '
+                             'last=마지막 6층을 7~12층 전체에 복사')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
@@ -86,10 +90,11 @@ def get_args_parser():
     return parser
 
 
-def _tile_encoder_layers(pretrained_st, model_enc_layers, logger=None):
-    """pretrained N층 encoder 가중치를 model_enc_layers층에 맞게 반복(tile) 복사.
+def _tile_encoder_layers(pretrained_st, model_enc_layers, mode='tile', logger=None):
+    """pretrained N층 encoder 가중치를 model_enc_layers층에 맞게 복사.
 
-    예: pretrained 6층 → 12층 모델이면 layers.6~11을 layers.0~5에서 복사.
+    mode='tile': 0→6, 1→7, 2→8, ... 패턴 반복
+    mode='last': 마지막 층(N-1)을 N~model_enc_layers-1 전체에 복사
     """
     from collections import OrderedDict
     new_st = OrderedDict(pretrained_st)
@@ -105,17 +110,28 @@ def _tile_encoder_layers(pretrained_st, model_enc_layers, logger=None):
     if model_enc_layers <= pretrain_n:
         return new_st
 
-    for src_idx in range(pretrain_n):
-        dst_idx = src_idx + pretrain_n
-        while dst_idx < model_enc_layers:
+    if mode == 'tile':
+        for src_idx in range(pretrain_n):
+            dst_idx = src_idx + pretrain_n
+            while dst_idx < model_enc_layers:
+                for k, v in list(pretrained_st.items()):
+                    prefix = f'transformer.encoder.layers.{src_idx}.'
+                    if k.startswith(prefix):
+                        new_key = f'transformer.encoder.layers.{dst_idx}.' + k[len(prefix):]
+                        new_st[new_key] = v.clone()
+                        if logger:
+                            logger.info(f'  [tile_layers] {k} → {new_key}')
+                dst_idx += pretrain_n
+    elif mode == 'last':
+        src_idx = pretrain_n - 1  # 마지막 pretrained 층 (e.g. layer 5)
+        for dst_idx in range(pretrain_n, model_enc_layers):
             for k, v in list(pretrained_st.items()):
                 prefix = f'transformer.encoder.layers.{src_idx}.'
                 if k.startswith(prefix):
                     new_key = f'transformer.encoder.layers.{dst_idx}.' + k[len(prefix):]
                     new_st[new_key] = v.clone()
                     if logger:
-                        logger.info(f'  [tile_layers] {k} → {new_key}')
-            dst_idx += pretrain_n
+                        logger.info(f'  [last_layer] {k} → {new_key}')
 
     return new_st
 
@@ -392,11 +408,12 @@ def main(args):
         logger.info("Ignore keys: {}".format(json.dumps(ignorelist, indent=2)))
         _tmp_st = OrderedDict({k:v for k, v in utils.clean_state_dict(checkpoint).items() if check_keep(k, _ignorekeywordlist)})
 
-        # ── encoder layer tiling: pretrained 6층 → 12층 복사 ──
-        if getattr(args, 'tile_encoder', False):
+        # ── encoder layer 초기화: tile / last / random ──
+        _enc_init = getattr(args, 'encoder_init', 'random')
+        if _enc_init in ('tile', 'last'):
             model_enc_layers = getattr(args, 'enc_layers', 6)
-            logger.info(f'[tile_encoder] pretrained layers → {model_enc_layers}층으로 tile')
-            _tmp_st = _tile_encoder_layers(_tmp_st, model_enc_layers, logger=logger)
+            logger.info(f'[encoder_init={_enc_init}] pretrained layers → {model_enc_layers}층으로 복사')
+            _tmp_st = _tile_encoder_layers(_tmp_st, model_enc_layers, mode=_enc_init, logger=logger)
 
         # ── JAX V-MoE expand_tile: pretrained FFN → MoE expert 가중치 복사 ──
         # pretrained의 linear1/linear2를 MoE layer의 expert w1/b1/w2/b2로 expand_tile.
