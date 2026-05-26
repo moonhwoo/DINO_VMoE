@@ -463,7 +463,26 @@ def main(args):
     vis_last_best_map   = 0.0
     vis_window_had_best = False
 
+    def compute_class_routing_lambda(epoch: int, args) -> float:
+        warmup = getattr(args, 'moe_class_routing_warmup_epochs', 0)
+        init   = getattr(args, 'moe_class_routing_loss_weight_init',  0.0)
+        final  = getattr(args, 'moe_class_routing_loss_weight_final', 0.0)
+        if warmup <= 0:
+            return final
+        return init + (final - init) * min(epoch / warmup, 1.0)
+
+    def update_class_routing_weight(model, lambda_val: float):
+        for m in model.modules():
+            if hasattr(m, 'set_class_routing_loss_weight'):
+                m.set_class_routing_loss_weight(lambda_val)
+
     for epoch in range(args.start_epoch, args.epochs):
+        # ── Class Routing Loss λ warmup ──
+        lam = compute_class_routing_lambda(epoch, args)
+        update_class_routing_weight(model_without_ddp, lam)
+        if utils.get_rank() == 0:
+            logger.info(f"[Epoch {epoch}] class_routing_lambda = {lam:.4f}")
+
         epoch_start_time = time.time()
         if args.distributed:
             sampler_train.set_epoch(epoch)

@@ -267,7 +267,16 @@ class DINO(nn.Module):
             assert targets is None
             input_query_bbox = input_query_label = attn_mask = dn_meta = None
 
-        hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(srcs, masks, input_query_bbox, poss,input_query_label,attn_mask)
+        gt_info = None
+        if self.training and targets is not None:
+            gt_info = {
+                'boxes':  [t['boxes']  for t in targets],
+                'labels': [t['labels'] for t in targets],
+            }
+
+        hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
+            srcs, masks, input_query_bbox, poss, input_query_label, attn_mask,
+            gt_info=gt_info)
         # In case num object=0
         hs[0] += self.label_enc.weight[0,0]*0.0
 
@@ -330,6 +339,14 @@ class DINO(nn.Module):
             else:
                 out['moe_auxiliary_loss'] = torch.tensor(
                     0.0, device=out['pred_logits'].device)
+            # class routing loss 모니터링 (gradient와 무관한 detach 합산)
+            cr_losses = [
+                m['class_routing_loss'].detach()
+                for m in self.transformer._moe_metrics
+                if m is not None and 'class_routing_loss' in m
+            ]
+            if cr_losses:
+                out['moe_class_routing_loss'] = sum(cr_losses)
 
         return out
 

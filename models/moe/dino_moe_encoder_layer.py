@@ -61,7 +61,10 @@ class DeformableTransformerEncoderMoELayer(nn.Module):
                  moe_group_images: int = 1,
                  expert_parallel: bool = False,
                  split_rngs: bool = False,
-                 moe_mode: str = 'baseline'):
+                 moe_mode: str = 'baseline',
+                 num_classes: int = 0,
+                 class_routing_loss_weight: float = 0.0,
+                 class_routing_alpha: float = 0.1):
         super().__init__()
 
         # ── Self Attention (기존과 동일) ──
@@ -90,6 +93,9 @@ class DeformableTransformerEncoderMoELayer(nn.Module):
             expert_parallel=expert_parallel,
             split_rngs=split_rngs,
             moe_mode=moe_mode,
+            num_classes=num_classes,
+            class_routing_loss_weight=class_routing_loss_weight,
+            class_routing_alpha=class_routing_alpha,
         )
         self.dropout3 = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(d_model)
@@ -105,7 +111,7 @@ class DeformableTransformerEncoderMoELayer(nn.Module):
         return tensor if pos is None else tensor + pos
 
     def forward(self, src, pos, reference_points, spatial_shapes,
-                level_start_index, key_padding_mask=None):
+                level_start_index, key_padding_mask=None, gt_info=None):
         """
         Args:
             src: (bs, sum(hi*wi), d_model)
@@ -129,7 +135,8 @@ class DeformableTransformerEncoderMoELayer(nn.Module):
 
         # ── 2. MoE Block (FFN 대체) ──
         #key_padding_mask: (B, N_total) =>concat되어있는 1D시퀀스 padding이면 true , 아니면 false
-        src2, moe_metrics = self.moe_block(src, key_padding_mask=key_padding_mask, spatial_shapes=spatial_shapes)
+        src2, moe_metrics = self.moe_block(src, key_padding_mask=key_padding_mask,
+                                           spatial_shapes=spatial_shapes, gt_info=gt_info)
         src = src + self.dropout3(src2)   # residual connection
         src = self.norm2(src)             # layer norm
 

@@ -84,6 +84,9 @@ class DeformableTransformer(nn.Module):
                  moe_expert_parallel=False,
                  moe_split_rngs=False,
                  moe_mode: str = 'baseline',
+                 moe_num_classes: int = 0,
+                 moe_class_routing_loss_weight: float = 0.0,
+                 moe_class_routing_alpha: float = 0.1,
                  ):
         super().__init__()
         self.use_moe = use_moe
@@ -149,6 +152,9 @@ class DeformableTransformer(nn.Module):
                 expert_parallel=moe_expert_parallel,
                 split_rngs=moe_split_rngs,
                 moe_mode=moe_mode,
+                num_classes=moe_num_classes,
+                class_routing_loss_weight=moe_class_routing_loss_weight,
+                class_routing_alpha=moe_class_routing_alpha,
             )
 
         encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
@@ -300,7 +306,7 @@ class DeformableTransformer(nn.Module):
             self.refpoint_embed.weight.data[:, :2] = inverse_sigmoid(self.refpoint_embed.weight.data[:, :2])
             self.refpoint_embed.weight.data[:, :2].requires_grad = False
 
-    def forward(self, srcs, masks, refpoint_embed, pos_embeds, tgt, attn_mask=None):
+    def forward(self, srcs, masks, refpoint_embed, pos_embeds, tgt, attn_mask=None, gt_info=None):
         """
         Input:
             - srcs: List of multi features [bs, ci, hi, wi]
@@ -353,6 +359,7 @@ class DeformableTransformer(nn.Module):
                 key_padding_mask=mask_flatten,
                 ref_token_index=enc_topk_proposals, # bs, nq
                 ref_token_coord=enc_refpoint_embed, # bs, nq, 4
+                gt_info=gt_info,
                 )
         # MoE auxiliary loss를 저장 (DINO.forward에서 접근)
         self._moe_metrics = moe_metrics
@@ -551,15 +558,16 @@ class TransformerEncoder(nn.Module):
         reference_points = reference_points[:, :, None] * valid_ratios[:, None]
         return reference_points
 
-    def forward(self, 
-            src: Tensor, 
-            pos: Tensor, 
-            spatial_shapes: Tensor, 
-            level_start_index: Tensor, 
-            valid_ratios: Tensor, 
+    def forward(self,
+            src: Tensor,
+            pos: Tensor,
+            spatial_shapes: Tensor,
+            level_start_index: Tensor,
+            valid_ratios: Tensor,
             key_padding_mask: Tensor,
             ref_token_index: Optional[Tensor]=None,
-            ref_token_coord: Optional[Tensor]=None 
+            ref_token_coord: Optional[Tensor]=None,
+            gt_info: Optional[dict]=None,
             ):
         """
         Input:
@@ -593,6 +601,12 @@ class TransformerEncoder(nn.Module):
             intermediate_output.append(out_i)
             intermediate_ref.append(ref_token_coord)
 
+        # valid_ratios를 gt_info에 주입: _compute_soft_labels에서 GT 좌표 보정에 사용
+        # GT box는 원본 이미지 기준 정규화, token 좌표는 padded 이미지 기준.
+        # valid_ratios[b,l,0]=W_valid/W_pad, [b,l,1]=H_valid/H_pad 로 스케일 보정.
+        if gt_info is not None and valid_ratios is not None:
+            gt_info = {**gt_info, 'valid_ratios': valid_ratios}
+
         # main process
         all_moe_metrics = []
         for layer_id, layer in enumerate(self.layers):
@@ -605,10 +619,16 @@ class TransformerEncoder(nn.Module):
 
             if not dropflag:
                 if self.deformable_encoder:
-                    result = layer(src=output, pos=pos, reference_points=reference_points, spatial_shapes=spatial_shapes, level_start_index=level_start_index, key_padding_mask=key_padding_mask)
+                    from models.moe.dino_moe_encoder_layer import DeformableTransformerEncoderMoELayer
+                    if isinstance(layer, DeformableTransformerEncoderMoELayer):
+                        result = layer(src=output, pos=pos, reference_points=reference_points,
+                                       spatial_shapes=spatial_shapes, level_start_index=level_start_index,
+                                       key_padding_mask=key_padding_mask, gt_info=gt_info)
+                    else:
+                        result = layer(src=output, pos=pos, reference_points=reference_points,
+                                       spatial_shapes=spatial_shapes, level_start_index=level_start_index,
+                                       key_padding_mask=key_padding_mask)
                     # MoE layer는 (src, metrics) 반환, 일반 layer는 src만 반환
-                    #spatial_shapes=spatial_shapes,      # ← (4, 2)
-                    #key_padding_mask=key_padding_mask   # ← (bs, 8500) 그대로 전달
                     if isinstance(result, tuple):
                         output, layer_moe_metrics = result
                         layer_moe_metrics['layer_id'] = layer_id  # 실제 인코더 층 번호 저장
@@ -1151,6 +1171,9 @@ def build_deformable_transformer(args):
         moe_expert_parallel=getattr(args, 'moe_expert_parallel', False),
         moe_split_rngs=getattr(args, 'moe_split_rngs', False),
         moe_mode=getattr(args, 'moe_mode', 'baseline'),
+        moe_num_classes=getattr(args, 'num_classes', 0),
+        moe_class_routing_loss_weight=getattr(args, 'moe_class_routing_loss_weight_init', 0.0),
+        moe_class_routing_alpha=getattr(args, 'moe_class_routing_alpha', 0.1),
     )
 
 

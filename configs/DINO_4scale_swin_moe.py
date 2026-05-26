@@ -28,6 +28,16 @@ moe_split_rngs = False               # False: 모든 expert를 동일 weight로 
                                      # True:  각 expert를 독립적으로 random init
 
 # ============================================================================
+# Class-Aware Routing Loss (No EMA, Setup B)
+# ============================================================================
+moe_class_routing_loss_weight_init  = 0.05   # λ 초기값 (epoch 0)
+moe_class_routing_loss_weight_final = 0.10   # λ 최종값 (warmup 완료 후)
+moe_class_routing_warmup_epochs     = 2      # 선형 warmup 기간 (epoch)
+moe_class_routing_alpha             = 1.0    # inter loss 비중 (intra:inter = 1:1)
+# num_classes는 기존 args.num_classes 재활용
+# 실효 비중 = moe_loss_coef(0.005) × λ(0.10) = 0.0005
+
+# ============================================================================
 # Ablation 대상 (주석 해제하여 실험)
 # ============================================================================
 # moe_layers = [5]                   # MoE 1개 layer만

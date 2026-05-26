@@ -121,7 +121,10 @@ class DINOMoEBlock(nn.Module):
                  moe_group_images: int = 1,
                  expert_parallel: bool = False,
                  split_rngs: bool = False,
-                 moe_mode: str = 'baseline'):
+                 moe_mode: str = 'baseline',
+                 num_classes: int = 0,
+                 class_routing_loss_weight: float = 0.0,
+                 class_routing_alpha: float = 0.1):
         super().__init__()
         self.num_experts = num_experts  # global total
         self.num_selected_experts = num_selected_experts
@@ -129,6 +132,9 @@ class DINOMoEBlock(nn.Module):
         self.moe_group_images = moe_group_images
         self.expert_parallel = expert_parallel
         self.moe_mode = moe_mode
+        self.num_classes = num_classes
+        self.class_routing_loss_weight = class_routing_loss_weight
+        self.class_routing_alpha = class_routing_alpha
 
         # EP: local expert 수 계산
         if expert_parallel and ep.get_ep_world_size() > 1:
@@ -181,14 +187,162 @@ class DINOMoEBlock(nn.Module):
                     param = getattr(self.experts, name)
                     param[1:] = param[0:1].expand_as(param[1:]).clone()
 
+    def set_class_routing_loss_weight(self, weight: float):
+        self.class_routing_loss_weight = float(weight)
+
+    def _compute_soft_labels(
+            self,
+            gt_info: dict,
+            spatial_shapes: torch.Tensor,
+            B: int,
+            device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """각 토큰에 대한 soft class label과 foreground 마스크를 계산.
+
+        token 좌표는 padded 이미지 기준 정규화, GT box는 원본 이미지 기준.
+        valid_ratios[b,l,0]=W_valid/W_pad, [b,l,1]=H_valid/H_pad 로 per-image per-level 보정.
+
+        Returns:
+            soft_labels : (B, N_total_orig, C)
+            fg_mask     : (B, N_total_orig)  True = foreground
+        """
+        C = self.num_classes
+        gt_boxes_list  = gt_info['boxes']              # list[Tensor(n_i, 4)] cxcywh normalized
+        gt_labels_list = gt_info['labels']             # list[Tensor(n_i,)]
+        valid_ratios   = gt_info.get('valid_ratios')   # (B, L, 2) or None
+
+        # level별 token 중심 좌표 생성 (padded 이미지 기준)
+        token_x_list, token_y_list = [], []
+        for l in range(spatial_shapes.shape[0]):
+            H_l = int(spatial_shapes[l, 0])
+            W_l = int(spatial_shapes[l, 1])
+            ys = (torch.arange(H_l, device=device).float() + 0.5) / H_l
+            xs = (torch.arange(W_l, device=device).float() + 0.5) / W_l
+            yy, xx = torch.meshgrid(ys, xs, indexing='ij')
+            token_x_list.append(xx.reshape(-1))  # (H_l*W_l,)
+            token_y_list.append(yy.reshape(-1))
+
+        N_per_level = [tx.shape[0] for tx in token_x_list]
+        N = sum(N_per_level)
+        soft_labels = torch.zeros(B, N, C, device=device)
+        fg_mask     = torch.zeros(B, N, dtype=torch.bool, device=device)
+
+        with torch.no_grad():
+            for b in range(B):
+                boxes  = gt_boxes_list[b]   # (n_b, 4)
+                labels = gt_labels_list[b]  # (n_b,)
+                if len(boxes) == 0:
+                    continue
+
+                # cxcywh → xyxy (원본 이미지 기준 정규화)
+                x1_orig = boxes[:, 0] - boxes[:, 2] / 2  # (n_b,)
+                y1_orig = boxes[:, 1] - boxes[:, 3] / 2
+                x2_orig = boxes[:, 0] + boxes[:, 2] / 2
+                y2_orig = boxes[:, 1] + boxes[:, 3] / 2
+
+                in_box_parts = []
+                for l, (tx, ty) in enumerate(zip(token_x_list, token_y_list)):
+                    # valid_ratios로 GT 좌표를 padded 이미지 기준으로 변환
+                    # token 좌표가 padded 기준이므로 GT도 동일 기준으로 맞춰야 함
+                    if valid_ratios is not None:
+                        vw = valid_ratios[b, l, 0]  # W_valid/W_pad
+                        vh = valid_ratios[b, l, 1]  # H_valid/H_pad
+                        x1 = x1_orig * vw
+                        y1 = y1_orig * vh
+                        x2 = x2_orig * vw
+                        y2 = y2_orig * vh
+                    else:
+                        x1, y1, x2, y2 = x1_orig, y1_orig, x2_orig, y2_orig
+
+                    # in_box_l[i, j]: level l의 token i가 GT box j 안에 있으면 True
+                    in_box_l = (
+                        (tx.unsqueeze(1) > x1.unsqueeze(0)) &
+                        (tx.unsqueeze(1) < x2.unsqueeze(0)) &
+                        (ty.unsqueeze(1) > y1.unsqueeze(0)) &
+                        (ty.unsqueeze(1) < y2.unsqueeze(0))
+                    )  # (N_l, n_b)
+                    in_box_parts.append(in_box_l)
+
+                in_box = torch.cat(in_box_parts, dim=0)  # (N, n_b)
+
+                n_boxes_per_token = in_box.sum(dim=1).float()  # (N,)
+                fg_mask[b] = n_boxes_per_token > 0
+
+                # n빵: token_class_counts[i,c] = 토큰 i에 해당하는 class c 박스 수
+                labels_oh = F.one_hot(labels.clamp(0, C - 1), C).float()  # (n_b, C)
+                token_class_counts = in_box.float() @ labels_oh            # (N, C)
+                soft_labels[b] = (
+                    token_class_counts /
+                    n_boxes_per_token.clamp(min=1.0).unsqueeze(1)
+                )
+
+        return soft_labels, fg_mask
+
+    def _compute_class_routing_loss(
+            self,
+            gates_gs:    torch.Tensor,
+            soft_labels: torch.Tensor,
+            fg_mask_gs:  torch.Tensor,
+            pad_mask_gs: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Class-aware routing loss (No EMA, batch prototype).
+
+        Args:
+            gates_gs    : (G, S, E) gate softmax
+            soft_labels : (G, S, C) soft class label
+            fg_mask_gs  : (G, S)   True = foreground
+            pad_mask_gs : (G, S)   True = EP padding (제외 대상)
+
+        Returns: scalar — intra + alpha * inter
+        """
+        valid = fg_mask_gs
+        if pad_mask_gs is not None:
+            valid = valid & (~pad_mask_gs)
+
+        M = int(valid.sum().item())
+        if M == 0:
+            return gates_gs.sum() * 0.0
+
+        r = gates_gs[valid]      # (M, E)
+        q = soft_labels[valid]   # (M, C)
+
+        # 배치 raw prototype: P_hat_c = (q^T @ r) / (q_sum + ε)
+        q_sum      = q.sum(dim=0)                                # (C,)
+        prototypes = q.T @ r                                     # (C, E)
+        prototypes = prototypes / (q_sum.unsqueeze(1) + 1e-8)
+
+        r_norm = F.normalize(r,          dim=-1)  # (M, E)
+        p_norm = F.normalize(prototypes, dim=-1)  # (C, E)
+
+        # Intra loss: 같은 class 토큰 → 같은 routing pattern
+        cos_sim = r_norm @ p_norm.T                              # (M, C)
+        intra   = (q * (1.0 - cos_sim)).sum() / M
+
+        # Inter loss: 다른 class prototype → 다른 routing pattern
+        active   = q_sum > 0
+        n_active = int(active.sum().item())
+        if n_active < 2:
+            inter = gates_gs.sum() * 0.0
+        else:
+            p_active = p_norm[active]                            # (n_active, E)
+            sim_mat  = p_active @ p_active.T                    # (n_active, n_active)
+            off_diag = ~torch.eye(n_active, dtype=torch.bool,
+                                  device=gates_gs.device)
+            inter = sim_mat[off_diag].sum() / (n_active * (n_active - 1))
+
+        return intra + self.class_routing_alpha * inter
+
     def forward(self, src: torch.Tensor,
                 key_padding_mask: Optional[torch.Tensor] = None,
                 spatial_shapes: Optional[torch.Tensor] = None,
+                gt_info: Optional[dict] = None,
                 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Args:
             src: (B, N_total, D) — 인코더 토큰
             key_padding_mask: (B, N_total) — True = 패딩 위치
+            gt_info: {'boxes': list[Tensor(n,4)], 'labels': list[Tensor(n,)]}
+                     학습 시에만 전달, inference 시 None
 
         Returns:
             output: (B, N_total, D) — 순수 FFN 출력 (residual/norm 미포함)
@@ -270,11 +424,41 @@ class DINOMoEBlock(nn.Module):
                     key_padding_mask[:, N_total:] = True
                 N_total = max_N
 
+        # ── soft_labels 계산 (baseline/scale_aware 공용, 한 번만) ──
+        soft_labels_flat = fg_mask_flat = None
+        if (gt_info is not None and self.training and
+                self.num_classes > 0 and self.class_routing_loss_weight > 0 and
+                spatial_shapes is not None):
+            soft_labels_flat, fg_mask_flat = self._compute_soft_labels(
+                gt_info, spatial_shapes, B, src.device)
+            # soft_labels_flat: (B, N_total_orig, C)
+            orig_N = soft_labels_flat.shape[1]
+            if orig_N < N_total:   # EP 패딩이 적용된 경우
+                if per_scale_pad_info is not None:
+                    # per-scale 패딩: level별로 맞춰서 pad
+                    orig_per, padded_per = per_scale_pad_info
+                    sl_sp = soft_labels_flat.split(orig_per.tolist(), dim=1)
+                    fm_sp = fg_mask_flat.split(orig_per.tolist(), dim=1)
+                    sl_list, fm_list = [], []
+                    for lvl_idx in range(len(orig_per)):
+                        p = int(padded_per[lvl_idx]) - int(orig_per[lvl_idx])
+                        sl_list.append(F.pad(sl_sp[lvl_idx], (0, 0, 0, p)) if p > 0 else sl_sp[lvl_idx])
+                        fm_list.append(F.pad(fm_sp[lvl_idx], (0, p))       if p > 0 else fm_sp[lvl_idx])
+                    soft_labels_flat = torch.cat(sl_list, dim=1)
+                    fg_mask_flat     = torch.cat(fm_list, dim=1)
+                else:
+                    # flat-end 패딩
+                    pad_len = N_total - orig_N
+                    soft_labels_flat = F.pad(soft_labels_flat, (0, 0, 0, pad_len))
+                    fg_mask_flat     = F.pad(fg_mask_flat,     (0, pad_len))
+
         # ── 모드 분기: scale_aware이면 별도 메서드로 처리 ──
         if self.moe_mode == 'scale_aware' and spatial_shapes is not None:
             return self._forward_scale_aware(
                 src, key_padding_mask, spatial_shapes,
-                per_scale_pad_info, orig_N_total)
+                per_scale_pad_info, orig_N_total,
+                soft_labels=soft_labels_flat,
+                fg_mask=fg_mask_flat)
 
         # ── 0. JAX 원본 V-MoE 방식 (baseline): group_size = moe_group_images * N_total ──
         group_size = self.moe_group_images * N_total
@@ -307,6 +491,16 @@ class DINOMoEBlock(nn.Module):
         #deterministic일때 return== gates_softmax, metrics
         #non-detministic일때 return ==gates_softmax_noisy, metrics  즉 노이즈가 낀 값을 넘겨줌
 
+        # ── 2.5. Class Routing Loss (baseline) ──
+        if soft_labels_flat is not None:
+            sl_gs = soft_labels_flat.reshape(num_groups, group_size, self.num_classes)
+            fm_gs = fg_mask_flat.reshape(num_groups, group_size)
+            class_loss = self._compute_class_routing_loss(
+                gates_softmax, sl_gs, fm_gs, pad_mask_gs=mask_grouped)
+            metrics['class_routing_loss'] = class_loss
+            metrics['auxiliary_loss'] = (
+                metrics['auxiliary_loss'] +
+                self.class_routing_loss_weight * class_loss)
 
         # ── 3. Dispatcher 생성 ──
         # capacity는 gates.shape[1] = group_size (패딩 포함 가능) 기준으로 자동 계산.
@@ -656,6 +850,8 @@ class DINOMoEBlock(nn.Module):
             spatial_shapes: torch.Tensor,
             per_scale_pad_info,
             orig_N_total: int,
+            soft_labels: Optional[torch.Tensor] = None,
+            fg_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Scale-Aware MoE: scale별로 독립적으로 라우팅.
 
@@ -689,6 +885,14 @@ class DINOMoEBlock(nn.Module):
             f"나누어 떨어져야 합니다.")
         num_groups = B // self.moe_group_images   # G
 
+        # soft_labels를 level별로 미리 split.
+        # src와 동일하게 padded_per_level 기준으로 split해야 함.
+        # forward()에서 이미 EP 패딩이 반영된 채로 전달되므로 padded 크기가 일치.
+        sl_splits = fm_splits = None
+        if soft_labels is not None:
+            sl_splits = soft_labels.split(padded_per_level.tolist(), dim=1)  # list[(B, S_l_padded, C)]
+            fm_splits = fg_mask.split(padded_per_level.tolist(),     dim=1)  # list[(B, S_l_padded)]
+
         all_output_splits = []
         all_metrics_lists = {}
 
@@ -717,6 +921,19 @@ class DINOMoEBlock(nn.Module):
             # ── Softmax + aux loss (패딩 제외) ──
             gates_l, metrics_l = self._compute_gates_and_metrics(
                 gate_logits_l, mask_l_grouped)
+
+            # ── Class Routing Loss (scale_aware, level별) ──
+            if sl_splits is not None:
+                sl_l = sl_splits[lvl]   # (B, S_l, C) — 이미 padded_per_level 크기
+                fm_l = fm_splits[lvl]   # (B, S_l)
+                sl_l_gs = sl_l.reshape(num_groups, group_size_l, self.num_classes)
+                fm_l_gs = fm_l.reshape(num_groups, group_size_l)
+                class_loss_l = self._compute_class_routing_loss(
+                    gates_l, sl_l_gs, fm_l_gs, pad_mask_gs=mask_l_grouped)
+                metrics_l['class_routing_loss'] = class_loss_l
+                metrics_l['auxiliary_loss'] = (
+                    metrics_l['auxiliary_loss'] +
+                    self.class_routing_loss_weight * class_loss_l)
 
             # ── Dispatcher 생성 ──
             # capacity는 gates.shape[1] = group_size_l (EP padding 포함 가능) 기준으로 자동 계산.
