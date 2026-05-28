@@ -188,7 +188,10 @@ class MetricLogger(object):
         for name, meter in self.meters.items():
             if meter.count > 0:
                 # 콘솔 출력 필터링: _unscaled, _0~_9(중간 레이어), _interm 제외
-                if 'unscaled' in name or re.search(r'_\d+$', name) or 'interm' in name:
+                # 단, MoE class routing loss는 unscaled도 함께 표시 (raw L_router 모니터링용)
+                always_show = {'moe_class_routing_loss_unscaled'}
+                if name not in always_show and (
+                        'unscaled' in name or re.search(r'_\d+$', name) or 'interm' in name):
                     continue
                 loss_str.append(
                     "{}: {}".format(name, str(meter))

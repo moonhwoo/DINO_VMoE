@@ -339,9 +339,10 @@ class DINO(nn.Module):
             else:
                 out['moe_auxiliary_loss'] = torch.tensor(
                     0.0, device=out['pred_logits'].device)
-            # class routing loss 모니터링 (gradient와 무관한 detach 합산)
+            # class routing loss — gradient 흐르도록 detach 없이 합산
+            # (weight_dict['moe_class_routing_loss']의 λ로 스케일링)
             cr_losses = [
-                m['class_routing_loss'].detach()
+                m['class_routing_loss']
                 for m in self.transformer._moe_metrics
                 if m is not None and 'class_routing_loss' in m
             ]
@@ -835,6 +836,10 @@ def build_dino(args):
     if getattr(args, 'use_moe', False):
         moe_loss_coef = getattr(args, 'moe_loss_coef', 0.01)
         weight_dict['moe_auxiliary_loss'] = moe_loss_coef
+        # L_router (class-aware routing loss) — 별도 가중치 λ로 스케일링
+        # 초기값은 warmup의 init 값. tools/main.py에서 epoch마다 갱신됨.
+        weight_dict['moe_class_routing_loss'] = getattr(
+            args, 'moe_class_routing_loss_weight_init', 0.0)
 
     losses = ['labels', 'boxes', 'cardinality']
     if args.masks:

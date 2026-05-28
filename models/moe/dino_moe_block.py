@@ -492,15 +492,13 @@ class DINOMoEBlock(nn.Module):
         #non-detministic일때 return ==gates_softmax_noisy, metrics  즉 노이즈가 낀 값을 넘겨줌
 
         # ── 2.5. Class Routing Loss (baseline) ──
+        # 스케일링은 weight_dict['moe_class_routing_loss']에서 처리 (raw 값만 저장)
         if soft_labels_flat is not None:
             sl_gs = soft_labels_flat.reshape(num_groups, group_size, self.num_classes)
             fm_gs = fg_mask_flat.reshape(num_groups, group_size)
             class_loss = self._compute_class_routing_loss(
                 gates_softmax, sl_gs, fm_gs, pad_mask_gs=mask_grouped)
             metrics['class_routing_loss'] = class_loss
-            metrics['auxiliary_loss'] = (
-                metrics['auxiliary_loss'] +
-                self.class_routing_loss_weight * class_loss)
 
         # ── 3. Dispatcher 생성 ──
         # capacity는 gates.shape[1] = group_size (패딩 포함 가능) 기준으로 자동 계산.
@@ -923,6 +921,7 @@ class DINOMoEBlock(nn.Module):
                 gate_logits_l, mask_l_grouped)
 
             # ── Class Routing Loss (scale_aware, level별) ──
+            # 스케일링은 weight_dict['moe_class_routing_loss']에서 처리 (raw 값만 저장)
             if sl_splits is not None:
                 sl_l = sl_splits[lvl]   # (B, S_l, C) — 이미 padded_per_level 크기
                 fm_l = fm_splits[lvl]   # (B, S_l)
@@ -931,9 +930,6 @@ class DINOMoEBlock(nn.Module):
                 class_loss_l = self._compute_class_routing_loss(
                     gates_l, sl_l_gs, fm_l_gs, pad_mask_gs=mask_l_grouped)
                 metrics_l['class_routing_loss'] = class_loss_l
-                metrics_l['auxiliary_loss'] = (
-                    metrics_l['auxiliary_loss'] +
-                    self.class_routing_loss_weight * class_loss_l)
 
             # ── Dispatcher 생성 ──
             # capacity는 gates.shape[1] = group_size_l (EP padding 포함 가능) 기준으로 자동 계산.

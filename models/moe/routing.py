@@ -332,7 +332,13 @@ def _weighted_sum(*args) -> torch.Tensor:
         if w > 0:
             term = x * w
             result = term if result is None else result + term
-    return result if result is not None else torch.tensor(0.0)
+    if result is not None:
+        return result
+    # 모든 가중치 0인 경우: 입력 텐서의 device/dtype 유지 (CUDA/CPU mismatch 방지)
+    for w, x in args:
+        if isinstance(x, torch.Tensor):
+            return torch.zeros((), device=x.device, dtype=x.dtype)
+    return torch.tensor(0.0)
 
 
 def _batch_dispatchers(dispatchers: list) -> BaseDispatcher:

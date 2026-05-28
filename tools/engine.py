@@ -67,6 +67,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             # MoE auxiliary loss 추가
             if 'moe_auxiliary_loss' in outputs:
                 loss_dict['moe_auxiliary_loss'] = outputs['moe_auxiliary_loss']
+            # L_router (class routing loss) — weight_dict['moe_class_routing_loss']로 스케일링
+            if 'moe_class_routing_loss' in outputs:
+                loss_dict['moe_class_routing_loss'] = outputs['moe_class_routing_loss']
 
             losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
@@ -216,6 +219,8 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             # MoE auxiliary loss 추가 (train_one_epoch와 동일한 처리)
             if 'moe_auxiliary_loss' in outputs:
                 loss_dict['moe_auxiliary_loss'] = outputs['moe_auxiliary_loss']
+            if 'moe_class_routing_loss' in outputs:
+                loss_dict['moe_class_routing_loss'] = outputs['moe_class_routing_loss']
         weight_dict = criterion.weight_dict
 
         # reduce losses over all GPUs for logging purposes

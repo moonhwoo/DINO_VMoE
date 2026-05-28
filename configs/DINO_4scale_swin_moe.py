@@ -4,16 +4,16 @@ _base_ = ['DINO_4scale_swin.py']
 # MoE 설정
 # ============================================================================
 use_moe = True
-moe_layers = [1,3,5,7,9,11]              # 6개 인코더 layer 중 (2)  (4),6번째에 MoE 적용
+moe_layers = [3,5]              # 6개 인코더 layer 중 (2)  (4),6번째에 MoE 적용
 moe_num_experts = 8                  # expert 수
 moe_num_selected_experts = 2         # top-K (각 토큰 → 2개 expert)
 moe_capacity_factor = 1.25        # 25% 여유 버퍼 학습할떈 1.25로 학습
 moe_noise_std = 1.0                  # routing noise (exploration)  =>지금은 non-deterministic
                                         #=> 0.0 으로하면 deterministic 과 똑같이 동작
-moe_loss_coef = 0.005                # auxiliary loss 가중치 (weight_dict)
-moe_gshard_loss_weight = 0        # G-Shard loss weight (router 내부)
-moe_importance_loss_weight = 1.0     # importance loss weight (router 내부)
-moe_load_loss_weight = 1.0           # load loss weight (router 내부)
+moe_loss_coef = 0.0                  # load balance auxiliary loss 가중치 (0 = OFF)
+moe_gshard_loss_weight = 0           # G-Shard loss weight (router 내부)
+moe_importance_loss_weight = 0.0     # importance loss weight (router 내부, 0 = OFF)
+moe_load_loss_weight = 0.0           # load loss weight (router 내부, 0 = OFF)
 moe_mode = 'scale_aware'                # 1.'baseline' (전체 토큰 단일 그룹) —
                                      # 2.'scale_aware'(scale 별로 토큰 그룹)
 moe_group_images = 4                # 그룹당 이미지 수 (JAX 원본의 min_batch_size_per_device)
@@ -29,13 +29,15 @@ moe_split_rngs = False               # False: 모든 expert를 동일 weight로 
 
 # ============================================================================
 # Class-Aware Routing Loss (No EMA, Setup B)
+# L_total = L_DINO + λ × L_router   (load balance는 OFF)
+# L_router = L_intra + α × L_inter
 # ============================================================================
-moe_class_routing_loss_weight_init  = 0.05   # λ 초기값 (epoch 0)
-moe_class_routing_loss_weight_final = 0.10   # λ 최종값 (warmup 완료 후)
-moe_class_routing_warmup_epochs     = 2      # 선형 warmup 기간 (epoch)
-moe_class_routing_alpha             = 1.0    # inter loss 비중 (intra:inter = 1:1)
+moe_class_routing_loss_weight_init  = 0.005  # λ 초기값 (epoch 0)
+moe_class_routing_loss_weight_final = 0.01   # λ 최종값 (warmup 완료 후)
+moe_class_routing_warmup_epochs     = 2       # 선형 warmup 기간 (epoch)
+moe_class_routing_alpha             = 1   # inter loss 비중
 # num_classes는 기존 args.num_classes 재활용
-# 실효 비중 = moe_loss_coef(0.005) × λ(0.10) = 0.0005
+# 실효 비중 = λ (단일, weight_dict['moe_class_routing_loss']에서 직접 적용)
 
 # ============================================================================
 # Ablation 대상 (주석 해제하여 실험)

@@ -471,15 +471,15 @@ def main(args):
             return final
         return init + (final - init) * min(epoch / warmup, 1.0)
 
-    def update_class_routing_weight(model, lambda_val: float):
-        for m in model.modules():
-            if hasattr(m, 'set_class_routing_loss_weight'):
-                m.set_class_routing_loss_weight(lambda_val)
+    def update_class_routing_weight(criterion, lambda_val: float):
+        # L_router의 λ는 weight_dict에서 직접 관리 (L_total = L_DINO + λ × L_router)
+        if 'moe_class_routing_loss' in criterion.weight_dict:
+            criterion.weight_dict['moe_class_routing_loss'] = float(lambda_val)
 
     for epoch in range(args.start_epoch, args.epochs):
         # ── Class Routing Loss λ warmup ──
         lam = compute_class_routing_lambda(epoch, args)
-        update_class_routing_weight(model_without_ddp, lam)
+        update_class_routing_weight(criterion, lam)
         if utils.get_rank() == 0:
             logger.info(f"[Epoch {epoch}] class_routing_lambda = {lam:.4f}")
 
